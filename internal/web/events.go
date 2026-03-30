@@ -72,13 +72,12 @@ func (h *handler) streamEvents(w http.ResponseWriter, r *http.Request) {
 			log.Trace().Str("event", event.Name).Str("id", event.ActorID).Msg("container event from store")
 			switch event.Name {
 			case "start", "die", "destroy", "rename":
-				if event.Name == "start" || event.Name == "rename" {
-					if containers, err := h.hostService.ListContainersForHost(event.Host, userLabels); err == nil {
-						log.Debug().Str("host", event.Host).Int("count", len(containers)).Msg("updating containers for host")
-						if err := sseWriter.Event("containers-changed", containers); err != nil {
-							log.Error().Err(err).Msg("error writing containers to event stream")
-							return
-						}
+				// Refresh container list for any event that changes the visible set
+				if containers, err := h.hostService.ListContainersForHost(event.Host, userLabels); err == nil {
+					log.Debug().Str("host", event.Host).Str("event", event.Name).Int("count", len(containers)).Msg("updating containers for host")
+					if err := sseWriter.Event("containers-changed", containers); err != nil {
+						log.Error().Err(err).Msg("error writing containers to event stream")
+						return
 					}
 				}
 
