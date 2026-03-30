@@ -96,7 +96,20 @@
               </router-link>
             </td>
             <td v-if="isVisible('host')">{{ container.hostLabel }}</td>
-            <td v-if="isVisible('state')">{{ container.state }}</td>
+            <td v-if="isVisible('state')">
+              <span>{{ container.state }}</span>
+              <span
+                v-if="container.statusBadge"
+                class="badge ml-1 text-xs"
+                :class="{
+                  'badge-error': container.statusBadge.type === 'error',
+                  'badge-warning': container.statusBadge.type === 'warning',
+                  'badge-info': container.statusBadge.type === 'info',
+                }"
+              >
+                {{ container.statusBadge.text }}
+              </span>
+            </td>
             <td v-if="isVisible('created')">
               <RelativeTime :date="container.created" />
             </td>
@@ -111,6 +124,19 @@
                 <LogFrequencyChart class="h-4 flex-1" :chart-data="container.logStatsHistory" />
                 <span class="min-w-10 text-right text-sm tabular-nums">{{ totalLogRate(container) }}</span>
               </div>
+            </td>
+            <td v-if="isVisible('hot')">
+              <span
+                v-if="container.anomalyScore > 0"
+                class="badge badge-sm tabular-nums"
+                :class="{
+                  'badge-error': container.anomalyScore >= 50,
+                  'badge-warning': container.anomalyScore >= 10 && container.anomalyScore < 50,
+                  'badge-info': container.anomalyScore > 0 && container.anomalyScore < 10,
+                }"
+              >
+                {{ container.anomalyScore }}
+              </span>
             </td>
           </tr>
         </tbody>
@@ -200,6 +226,12 @@ const fields: Record<
     },
     mobileVisible: false,
     customClass: "min-w-40",
+  },
+  hot: {
+    label: "label.hot",
+    sortFunc: (a: Container, b: Container) => (a.anomalyScore - b.anomalyScore) * direction.value,
+    mobileVisible: false,
+    customClass: "w-1",
   },
 };
 

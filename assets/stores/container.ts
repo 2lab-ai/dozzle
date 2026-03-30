@@ -69,13 +69,25 @@ export const useContainerStore = defineStore("container", () => {
       }
     });
     es.addEventListener("container-event", (e) => {
-      const event = JSON.parse((e as MessageEvent).data) as { actorId: string; name: string; time: string };
+      const event = JSON.parse((e as MessageEvent).data) as {
+        actorId: string;
+        name: string;
+        time: string;
+        actorAttributes?: Record<string, string>;
+      };
       const container = allContainersById.value[event.actorId];
       if (container) {
         switch (event.name) {
           case "die":
             container.state = "exited";
             container.finishedAt = new Date(event.time);
+            container.recordDie(event.actorAttributes?.exitCode);
+            break;
+          case "start":
+            if (container.state === "exited") {
+              container.recordRestart();
+            }
+            container.state = "running";
             break;
           case "destroy":
             container.state = "deleted";

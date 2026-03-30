@@ -30,6 +30,7 @@ export class HistoricalContainer {
 
 const defaultLogFreq: LogFreq = { info: 0, warn: 0, error: 0, debug: 0, fatal: 0 };
 const LOG_STATS_HISTORY_SIZE = 60;
+const RESTART_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
 
 export class Container {
   private _stat: Ref<Stat>;
@@ -37,6 +38,10 @@ export class Container {
   private readonly _statsHistory: Ref<Stat[]>;
   private readonly movingAverageStat: Ref<Stat>;
   private readonly _logStatsHistory: Ref<LogFreq[]>;
+
+  // Crash-loop / exit tracking
+  public lastExitCode: string | null = null;
+  private _restartTimestamps: number[] = [];
 
   constructor(
     public readonly id: string,
@@ -167,6 +172,64 @@ export class Container {
     if (history.length > LOG_STATS_HISTORY_SIZE) {
       history.shift();
     }
+  }
+
+  public recordDie(exitCode?: string) {
+    this.lastExitCode = exitCode ?? null;
+  }
+
+  public recordRestart() {
+    const now = Date.now();
+    this._restartTimestamps.push(now);
+    // Keep only timestamps within the window
+    const cutoff = now - RESTART_WINDOW_MS;
+    this._restartTimestamps = this._restartTimestamps.filter((t) => t > cutoff);
+  }
+
+  get restartCount(): number {
+    const now = Date.now();
+    const cutoff = now - RESTART_WINDOW_MS;
+    return this._restartTimestamps.filter((t) => t > cutoff).length;
+  }
+
+  get isCrashLooping(): boolean {
+    return this.restartCount >= 3;
+  }
+
+  get statusBadge(): { text: string; type: "error" | "warning" | "info" } | null {
+    if (this.isCrashLooping) {
+      return { text: `${this.restartCount} restarts`, type: "error" };
+    }
+    if (this.lastExitCode && this.lastExitCode !== "0" && this.state === "exited") {
+      const code = this.lastExitCode;
+      const label = code === "137" ? "OOM" : code === "143" ? "SIGTERM" : `Exit ${code}`;
+      return { text: label, type: "warning" };
+    }
+    if (this.health === "unhealthy") {
+      return { text: "unhealthy", type: "warning" };
+    }
+    return null;
+  }
+
+  /** Anomaly score for "hot" sorting — higher means more attention needed */
+  get anomalyScore(): number {
+    let score = 0;
+    // Crash-loop is the strongest signal
+    score += this.restartCount * 20;
+    // Unhealthy containers
+    if (this.health === "unhealthy") score += 30;
+    // Non-zero exit
+    if (this.lastExitCode && this.lastExitCode !== "0" && this.state === "exited") score += 15;
+    // Error/fatal log rate from recent history
+    const recent = this.logStatsHistory.slice(-3);
+    for (const r of recent) {
+      score += r.error * 3 + r.fatal * 10 + r.warn;
+    }
+    // High CPU (above 80% of EMA)
+    if (this.movingAverage.cpu > 80) score += 10;
+    // High memory (above 85%)
+    if (this.movingAverage.memory > 85) score += 10;
+    return score;
   }
 
   static fromJSON(c: ContainerJson): Container {
