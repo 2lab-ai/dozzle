@@ -33,6 +33,7 @@ type ContainerStore struct {
 }
 
 const defaultTimeout = 10 * time.Second
+const reconcileInterval = 30 * time.Second
 
 func NewContainerStore(ctx context.Context, client Client, statsCollect StatsCollector, labels ContainerLabels) *ContainerStore {
 	log.Debug().Str("host", client.Host().Name).Interface("labels", labels).Msg("initializing container store")
@@ -266,6 +267,58 @@ func (s *ContainerStore) SubscribeNewContainers(ctx context.Context, containers 
 	}()
 }
 
+// reconcile compares the in-memory container map with the actual Docker state
+// and removes any containers that Docker no longer knows about. This handles
+// cases where destroy events are missed (network hiccups, Docker race conditions).
+func (s *ContainerStore) reconcile() {
+	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
+	defer cancel()
+
+	liveContainers, err := s.client.ListContainers(ctx, s.labels)
+	if err != nil {
+		log.Warn().Err(err).Str("host", s.client.Host().Name).Msg("reconcile: failed to list containers")
+		return
+	}
+
+	liveIDs := make(map[string]struct{}, len(liveContainers))
+	for _, c := range liveContainers {
+		liveIDs[c.ID] = struct{}{}
+	}
+
+	var staleIDs []string
+	s.containers.Range(func(id string, c *Container) bool {
+		if _, alive := liveIDs[id]; !alive {
+			staleIDs = append(staleIDs, id)
+		}
+		return true
+	})
+
+	for _, id := range staleIDs {
+		log.Info().Str("id", id).Str("host", s.client.Host().Name).Msg("reconcile: removing stale container")
+		s.containers.Delete(id)
+
+		// Emit a synthetic destroy event so subscribers (frontend) can clean up
+		event := ContainerEvent{
+			Name:    "destroy",
+			ActorID: id,
+			Host:    s.client.Host().ID,
+			Time:    time.Now(),
+		}
+		s.subscribers.Range(func(c context.Context, events chan<- ContainerEvent) bool {
+			select {
+			case events <- event:
+			case <-c.Done():
+				s.subscribers.Delete(c)
+			}
+			return true
+		})
+	}
+
+	if len(staleIDs) > 0 {
+		log.Info().Int("removed", len(staleIDs)).Str("host", s.client.Host().Name).Msg("reconcile: cleaned up stale containers")
+	}
+}
+
 func (s *ContainerStore) init() {
 	stats := make(chan ContainerStat)
 	s.statsCollector.Subscribe(s.ctx, stats)
@@ -273,6 +326,9 @@ func (s *ContainerStore) init() {
 	s.checkConnectivity()
 
 	s.wg.Done()
+
+	reconcileTicker := time.NewTicker(reconcileInterval)
+	defer reconcileTicker.Stop()
 
 	for {
 		select {
@@ -418,6 +474,10 @@ func (s *ContainerStore) init() {
 				stat.ID = ""
 				container.Stats.Push(stat)
 			}
+
+		case <-reconcileTicker.C:
+			s.reconcile()
+
 		case <-s.ctx.Done():
 			return
 		}

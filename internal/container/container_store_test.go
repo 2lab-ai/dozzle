@@ -116,6 +116,66 @@ func TestContainerStore_die(t *testing.T) {
 	assert.Equal(t, containers[0].State, "exited")
 }
 
+func TestContainerStore_reconcile_removes_stale(t *testing.T) {
+	client := new(mockedClient)
+
+	// Initial list returns 2 containers
+	client.On("ListContainers", mock.Anything, mock.Anything).Return([]Container{
+		{
+			ID:    "aaa",
+			Name:  "alive",
+			State: "running",
+			Stats: utils.NewRingBuffer[ContainerStat](300),
+		},
+	}, nil).Maybe()
+
+	client.On("ContainerEvents", mock.Anything, mock.AnythingOfType("chan<- container.ContainerEvent")).Return(nil).
+		Run(func(args mock.Arguments) {
+			ctx := args.Get(0).(context.Context)
+			<-ctx.Done()
+		})
+	client.On("Host").Return(Host{
+		ID:   "localhost",
+		Name: "localhost",
+	})
+	client.On("FindContainer", mock.Anything, "aaa").Return(Container{
+		ID:    "aaa",
+		Name:  "alive",
+		Stats: utils.NewRingBuffer[ContainerStat](300),
+	}, nil).Maybe()
+
+	store := NewContainerStore(t.Context(), client, &fakeStatsCollector{}, ContainerLabels{})
+
+	// Wait for init
+	containers, _ := store.ListContainers(ContainerLabels{})
+	assert.Equal(t, 1, len(containers))
+
+	// Manually inject a stale container into the store (simulating missed destroy event)
+	stale := Container{ID: "bbb", Name: "stale", State: "exited", Stats: utils.NewRingBuffer[ContainerStat](300)}
+	store.containers.Store("bbb", &stale)
+
+	// Verify stale container is in the store
+	containers, _ = store.ListContainers(ContainerLabels{})
+	assert.Equal(t, 2, len(containers))
+
+	// Subscribe to events to capture synthetic destroy
+	events := make(chan ContainerEvent, 10)
+	store.SubscribeEvents(t.Context(), events)
+
+	// Run reconcile
+	store.reconcile()
+
+	// Stale container should be removed
+	containers, _ = store.ListContainers(ContainerLabels{})
+	assert.Equal(t, 1, len(containers))
+	assert.Equal(t, "aaa", containers[0].ID)
+
+	// Should have received a synthetic destroy event
+	event := <-events
+	assert.Equal(t, "destroy", event.Name)
+	assert.Equal(t, "bbb", event.ActorID)
+}
+
 type fakeStatsCollector struct{}
 
 func (f *fakeStatsCollector) Subscribe(_ context.Context, _ chan<- ContainerStat) {}
