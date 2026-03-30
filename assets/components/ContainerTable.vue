@@ -87,7 +87,14 @@
           <tr
             v-for="container in paginated"
             :key="container.id"
-            v-memo="[container.id, statMode]"
+            v-memo="[
+              container.id,
+              statMode,
+              container.state,
+              container.stat,
+              container.anomalyScore,
+              container.logStatsHistory.at(-1),
+            ]"
             class="hover:bg-base-100/80!"
           >
             <td v-if="isVisible('name')" class="max-w-80 truncate">
