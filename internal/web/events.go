@@ -23,7 +23,7 @@ func (h *handler) streamEvents(w http.ResponseWriter, r *http.Request) {
 
 	events := make(chan container.ContainerEvent)
 	stats := make(chan container.ContainerStat)
-	logStats := make(chan container.LogStat)
+	logStats := make(chan container.LogStat, 50)
 	availableHosts := make(chan container.Host)
 
 	h.hostService.SubscribeEventsAndStats(r.Context(), events, stats)

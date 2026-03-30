@@ -31,6 +31,7 @@ type ContainerStore struct {
 	statsCollector          StatsCollector
 	wg                      sync.WaitGroup
 	connected               atomic.Bool
+	logStatsRunning          atomic.Bool
 	events                  chan ContainerEvent
 	ctx                     context.Context
 	labels                  ContainerLabels
@@ -336,46 +337,7 @@ func (s *ContainerStore) collectLogStats() {
 			continue
 		}
 
-		// Demux Docker multiplexed stream for non-TTY containers
-		pr, pw := io.Pipe()
-		go func() {
-			err := demuxDockerStream(pw, reader, t.tty)
-			if err != nil {
-				log.Debug().Err(err).Str("id", t.id).Msg("error demuxing docker stream")
-				pw.CloseWithError(err)
-			} else {
-				pw.Close()
-			}
-		}()
-
-		stat := LogStat{ID: t.id}
-		scanner := bufio.NewScanner(pr)
-		scanner.Buffer(make([]byte, 0, 256*1024), 256*1024) // handle long JSON log lines
-		for scanner.Scan() {
-			line := scanner.Text()
-			if len(line) == 0 {
-				continue
-			}
-			level := GuessLogLevelFromLine(line)
-			switch level {
-			case "info":
-				stat.Info++
-			case "warn":
-				stat.Warn++
-			case "error":
-				stat.Error++
-			case "debug":
-				stat.Debug++
-			case "fatal":
-				stat.Fatal++
-			default:
-				stat.Info++
-			}
-		}
-		if err := scanner.Err(); err != nil {
-			log.Debug().Err(err).Str("id", t.id).Msg("scanner error during log stats collection")
-		}
-		pr.Close()
+		stat := s.collectLogStatForContainer(ctx, t.id, t.tty, reader)
 		reader.Close()
 		cancel()
 
@@ -390,6 +352,45 @@ func (s *ContainerStore) collectLogStats() {
 			return true
 		})
 	}
+}
+
+// collectLogStatForContainer demuxes and scans logs for a single container.
+func (s *ContainerStore) collectLogStatForContainer(_ context.Context, id string, tty bool, reader io.ReadCloser) LogStat {
+	pr, pw := io.Pipe()
+	go func() {
+		err := demuxDockerStream(pw, reader, tty)
+		pw.CloseWithError(err) // always propagate (nil is fine)
+	}()
+
+	stat := LogStat{ID: id}
+	scanner := bufio.NewScanner(pr)
+	scanner.Buffer(make([]byte, 0, 256*1024), 256*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if len(line) == 0 {
+			continue
+		}
+		level := GuessLogLevelFromLine(line)
+		switch level {
+		case "info":
+			stat.Info++
+		case "warn":
+			stat.Warn++
+		case "error":
+			stat.Error++
+		case "debug":
+			stat.Debug++
+		case "fatal":
+			stat.Fatal++
+		default:
+			stat.Info++
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		log.Debug().Err(err).Str("id", id).Msg("scanner error during log stats collection")
+	}
+	pr.Close()
+	return stat
 }
 
 // reconcile compares the in-memory container map with the actual Docker state
@@ -607,7 +608,12 @@ func (s *ContainerStore) init() {
 			s.reconcile()
 
 		case <-logStatsTicker.C:
-			go s.collectLogStats()
+			if s.logStatsRunning.CompareAndSwap(false, true) {
+				go func() {
+					defer s.logStatsRunning.Store(false)
+					s.collectLogStats()
+				}()
+			}
 
 		case <-s.ctx.Done():
 			return
