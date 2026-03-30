@@ -342,12 +342,15 @@ func (s *ContainerStore) collectLogStats() {
 			err := demuxDockerStream(pw, reader, t.tty)
 			if err != nil {
 				log.Debug().Err(err).Str("id", t.id).Msg("error demuxing docker stream")
+				pw.CloseWithError(err)
+			} else {
+				pw.Close()
 			}
-			pw.Close()
 		}()
 
 		stat := LogStat{ID: t.id}
 		scanner := bufio.NewScanner(pr)
+		scanner.Buffer(make([]byte, 0, 256*1024), 256*1024) // handle long JSON log lines
 		for scanner.Scan() {
 			line := scanner.Text()
 			if len(line) == 0 {
@@ -366,9 +369,11 @@ func (s *ContainerStore) collectLogStats() {
 			case "fatal":
 				stat.Fatal++
 			default:
-				// Lines with unrecognized level still count as info
 				stat.Info++
 			}
+		}
+		if err := scanner.Err(); err != nil {
+			log.Debug().Err(err).Str("id", t.id).Msg("scanner error during log stats collection")
 		}
 		pr.Close()
 		reader.Close()
@@ -379,6 +384,8 @@ func (s *ContainerStore) collectLogStats() {
 			case ch <- stat:
 			case <-c.Done():
 				s.logStatSubscribers.Delete(c)
+			default:
+				// Drop stat if subscriber is slow — don't block the collector
 			}
 			return true
 		})

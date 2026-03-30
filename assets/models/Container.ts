@@ -189,7 +189,9 @@ export class Container {
   get restartCount(): number {
     const now = Date.now();
     const cutoff = now - RESTART_WINDOW_MS;
-    return this._restartTimestamps.filter((t) => t > cutoff).length;
+    // Prune stale timestamps while counting
+    this._restartTimestamps = this._restartTimestamps.filter((t) => t > cutoff);
+    return this._restartTimestamps.length;
   }
 
   get isCrashLooping(): boolean {
@@ -197,12 +199,14 @@ export class Container {
   }
 
   get statusBadge(): { text: string; type: "error" | "warning" | "info" } | null {
-    if (this.isCrashLooping) {
-      return { text: `${this.restartCount} restarts`, type: "error" };
+    const restarts = this.restartCount;
+    if (restarts >= 3) {
+      return { text: `${restarts} restarts`, type: "error" };
     }
     if (this.lastExitCode && this.lastExitCode !== "0" && this.state === "exited") {
       const code = this.lastExitCode;
-      const label = code === "137" ? "OOM" : code === "143" ? "SIGTERM" : `Exit ${code}`;
+      // 137=SIGKILL (may be OOM but not always), 143=SIGTERM
+      const label = code === "137" ? "Killed" : code === "143" ? "SIGTERM" : `Exit ${code}`;
       return { text: label, type: "warning" };
     }
     if (this.health === "unhealthy") {
@@ -214,20 +218,15 @@ export class Container {
   /** Anomaly score for "hot" sorting — higher means more attention needed */
   get anomalyScore(): number {
     let score = 0;
-    // Crash-loop is the strongest signal
-    score += this.restartCount * 20;
-    // Unhealthy containers
+    const restarts = this.restartCount;
+    score += restarts * 20;
     if (this.health === "unhealthy") score += 30;
-    // Non-zero exit
     if (this.lastExitCode && this.lastExitCode !== "0" && this.state === "exited") score += 15;
-    // Error/fatal log rate from recent history
     const recent = this.logStatsHistory.slice(-3);
     for (const r of recent) {
       score += r.error * 3 + r.fatal * 10 + r.warn;
     }
-    // High CPU (above 80% of EMA)
     if (this.movingAverage.cpu > 80) score += 10;
-    // High memory (above 85%)
     if (this.movingAverage.memory > 85) score += 10;
     return score;
   }
