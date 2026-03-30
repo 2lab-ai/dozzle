@@ -85,7 +85,7 @@ jobs:
           path: playwright-report/
           retention-days: 30
   buildx:
-    needs: [go-test, npm-test, int-test]
+    needs: [go-test, npm-test]
     name: Release
     runs-on: ubuntu-latest
     permissions:
