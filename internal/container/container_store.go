@@ -3,7 +3,9 @@ package container
 import (
 	"bufio"
 	"context"
+	"encoding/binary"
 	"errors"
+	"io"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -279,33 +281,73 @@ func (s *ContainerStore) SubscribeLogStats(ctx context.Context, logStats chan<- 
 	}()
 }
 
+// demuxDockerStream strips the 8-byte multiplexed headers from non-TTY Docker log streams,
+// writing clean text to w. For TTY containers, it copies the stream as-is.
+func demuxDockerStream(w io.Writer, r io.Reader, tty bool) error {
+	if tty {
+		_, err := io.Copy(w, r)
+		return err
+	}
+	header := make([]byte, 8)
+	for {
+		if _, err := io.ReadFull(r, header); err != nil {
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				return nil
+			}
+			return err
+		}
+		size := binary.BigEndian.Uint32(header[4:])
+		if size == 0 {
+			continue
+		}
+		if _, err := io.CopyN(w, r, int64(size)); err != nil {
+			return err
+		}
+	}
+}
+
 // collectLogStats fetches recent logs for all running containers and counts by level.
 func (s *ContainerStore) collectLogStats() {
-	var ids []string
+	type idTty struct {
+		id  string
+		tty bool
+	}
+	var targets []idTty
 	s.containers.Range(func(id string, c *Container) bool {
 		if c.State == "running" {
-			ids = append(ids, id)
+			targets = append(targets, idTty{id: id, tty: c.Tty})
 		}
 		return true
 	})
 
-	if len(ids) == 0 {
+	if len(targets) == 0 {
 		return
 	}
 
 	now := time.Now()
 	since := now.Add(-logStatsInterval)
 
-	for _, id := range ids {
+	for _, t := range targets {
 		ctx, cancel := context.WithTimeout(s.ctx, 2*time.Second)
-		reader, err := s.client.ContainerLogsBetweenDates(ctx, id, since, now, STDALL)
+		reader, err := s.client.ContainerLogsBetweenDates(ctx, t.id, since, now, STDALL)
 		if err != nil {
+			log.Debug().Err(err).Str("id", t.id).Msg("failed to fetch logs for log stats")
 			cancel()
 			continue
 		}
 
-		stat := LogStat{ID: id}
-		scanner := bufio.NewScanner(reader)
+		// Demux Docker multiplexed stream for non-TTY containers
+		pr, pw := io.Pipe()
+		go func() {
+			err := demuxDockerStream(pw, reader, t.tty)
+			if err != nil {
+				log.Debug().Err(err).Str("id", t.id).Msg("error demuxing docker stream")
+			}
+			pw.Close()
+		}()
+
+		stat := LogStat{ID: t.id}
+		scanner := bufio.NewScanner(pr)
 		for scanner.Scan() {
 			line := scanner.Text()
 			if len(line) == 0 {
@@ -323,8 +365,12 @@ func (s *ContainerStore) collectLogStats() {
 				stat.Debug++
 			case "fatal":
 				stat.Fatal++
+			default:
+				// Lines with unrecognized level still count as info
+				stat.Info++
 			}
 		}
+		pr.Close()
 		reader.Close()
 		cancel()
 
