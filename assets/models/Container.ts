@@ -1,7 +1,8 @@
-import type { ContainerHealth, ContainerJson, ContainerStat, ContainerState } from "@/types/Container";
+import type { ContainerHealth, ContainerJson, ContainerStat, ContainerState, LogStat } from "@/types/Container";
 import { Ref } from "vue";
 
 export type Stat = Omit<ContainerStat, "id">;
+export type LogFreq = Omit<LogStat, "id">;
 
 const hosts = computed(() =>
   config.hosts.reduce(
@@ -27,11 +28,15 @@ export class HistoricalContainer {
   ) {}
 }
 
+const defaultLogFreq: LogFreq = { info: 0, warn: 0, error: 0, debug: 0, fatal: 0 };
+const LOG_STATS_HISTORY_SIZE = 60;
+
 export class Container {
   private _stat: Ref<Stat>;
   private _name: string;
   private readonly _statsHistory: Ref<Stat[]>;
   private readonly movingAverageStat: Ref<Stat>;
+  private readonly _logStatsHistory: Ref<LogFreq[]>;
 
   constructor(
     public readonly id: string,
@@ -57,8 +62,14 @@ export class Container {
     const padding = Array(300 - recentStats.length).fill(defaultStat);
     this._statsHistory = ref([...padding, ...recentStats]);
     this.movingAverageStat = ref(stats.at(-1) || defaultStat);
+    const logPadding = Array(LOG_STATS_HISTORY_SIZE).fill(defaultLogFreq);
+    this._logStatsHistory = ref(logPadding);
 
     this._name = name;
+  }
+
+  get logStatsHistory() {
+    return unref(this._logStatsHistory);
   }
 
   get statsHistory() {
@@ -145,6 +156,16 @@ export class Container {
       this.movingAverageStat.value = newEma;
     } else {
       (this.movingAverageStat as unknown as Stat) = newEma;
+    }
+  }
+
+  public updateLogStat(logStat: LogFreq) {
+    const history = isRef(this._logStatsHistory)
+      ? this._logStatsHistory.value
+      : (this._logStatsHistory as unknown as LogFreq[]);
+    history.push(logStat);
+    if (history.length > LOG_STATS_HISTORY_SIZE) {
+      history.shift();
     }
   }
 

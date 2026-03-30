@@ -1,6 +1,6 @@
 import { acceptHMRUpdate, defineStore } from "pinia";
 import { Ref, UnwrapNestedRefs } from "vue";
-import type { ContainerHealth, ContainerJson, ContainerStat } from "@/types/Container";
+import type { ContainerHealth, ContainerJson, ContainerStat, LogStat } from "@/types/Container";
 import { Container } from "@/models/Container";
 import i18n from "@/modules/i18n";
 import { Host } from "./hosts";
@@ -58,6 +58,14 @@ export const useContainerStore = defineStore("container", () => {
       if (container) {
         const { id, ...rest } = stat;
         container.updateStat(rest);
+      }
+    });
+    es.addEventListener("container-log-stat", (e) => {
+      const logStat = JSON.parse((e as MessageEvent).data) as LogStat;
+      const container = allContainersById.value[logStat.id] as unknown as UnwrapNestedRefs<Container>;
+      if (container) {
+        const { id, ...rest } = logStat;
+        container.updateLogStat(rest);
       }
     });
     es.addEventListener("container-event", (e) => {

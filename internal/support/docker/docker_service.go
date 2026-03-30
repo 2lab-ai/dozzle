@@ -103,6 +103,10 @@ func (d *DockerClientService) SubscribeStats(ctx context.Context, stats chan<- c
 	d.store.SubscribeStats(ctx, stats)
 }
 
+func (d *DockerClientService) SubscribeLogStats(ctx context.Context, logStats chan<- container.LogStat) {
+	d.store.SubscribeLogStats(ctx, logStats)
+}
+
 func (d *DockerClientService) SubscribeEvents(ctx context.Context, events chan<- container.ContainerEvent) {
 	d.store.SubscribeEvents(ctx, events)
 }

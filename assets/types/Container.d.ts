@@ -7,6 +7,15 @@ export interface ContainerStat {
   readonly networkTxTotal: number;
 }
 
+export interface LogStat {
+  readonly id: string;
+  readonly info: number;
+  readonly warn: number;
+  readonly error: number;
+  readonly debug: number;
+  readonly fatal: number;
+}
+
 export type ContainerJson = {
   readonly id: string;
   readonly created: string;

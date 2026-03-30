@@ -92,6 +92,10 @@ func (k *K8sClientService) SubscribeContainersStarted(ctx context.Context, conta
 	k.store.SubscribeNewContainers(ctx, containers)
 }
 
+func (k *K8sClientService) SubscribeLogStats(ctx context.Context, logStats chan<- container.LogStat) {
+	k.store.SubscribeLogStats(ctx, logStats)
+}
+
 func (k *K8sClientService) Attach(ctx context.Context, c container.Container, events container.ExecEventReader, stdout io.Writer) error {
 	cancelCtx, cancel := context.WithCancel(ctx)
 	session, err := k.client.ContainerAttach(cancelCtx, c.ID)

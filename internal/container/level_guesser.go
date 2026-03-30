@@ -118,6 +118,12 @@ var singleLetterToLevel = map[byte]string{
 	'V': "trace",
 }
 
+// GuessLogLevelFromLine guesses the log level from a raw log line string.
+// Exported for use by log stats collection.
+func GuessLogLevelFromLine(line string) string {
+	return guessFromString(line)
+}
+
 func guessFromString(value string) string {
 	value = StripANSI(value)
 	value = timestampRegex.ReplaceAllString(value, "")

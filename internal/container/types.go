@@ -115,6 +115,16 @@ type ContainerStat struct {
 	NetworkTxTotal uint64  `json:"networkTxTotal"`
 }
 
+// LogStat represents log frequency counts per level for a container over a time window
+type LogStat struct {
+	ID    string `json:"id"`
+	Info  int    `json:"info"`
+	Warn  int    `json:"warn"`
+	Error int    `json:"error"`
+	Debug int    `json:"debug"`
+	Fatal int    `json:"fatal"`
+}
+
 // ContainerEvent represents events that are triggered
 type ContainerEvent struct {
 	Name            string            `json:"name"`

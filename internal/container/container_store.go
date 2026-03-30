@@ -1,6 +1,7 @@
 package container
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"sync"
@@ -23,6 +24,7 @@ type ContainerStore struct {
 	containers              *xsync.Map[string, *Container]
 	subscribers             *xsync.Map[context.Context, chan<- ContainerEvent]
 	newContainerSubscribers *xsync.Map[context.Context, chan<- Container]
+	logStatSubscribers      *xsync.Map[context.Context, chan<- LogStat]
 	client                  Client
 	statsCollector          StatsCollector
 	wg                      sync.WaitGroup
@@ -34,6 +36,7 @@ type ContainerStore struct {
 
 const defaultTimeout = 10 * time.Second
 const reconcileInterval = 30 * time.Second
+const logStatsInterval = 5 * time.Second
 
 func NewContainerStore(ctx context.Context, client Client, statsCollect StatsCollector, labels ContainerLabels) *ContainerStore {
 	log.Debug().Str("host", client.Host().Name).Interface("labels", labels).Msg("initializing container store")
@@ -43,6 +46,7 @@ func NewContainerStore(ctx context.Context, client Client, statsCollect StatsCol
 		client:                  client,
 		subscribers:             xsync.NewMap[context.Context, chan<- ContainerEvent](),
 		newContainerSubscribers: xsync.NewMap[context.Context, chan<- Container](),
+		logStatSubscribers:      xsync.NewMap[context.Context, chan<- LogStat](),
 		statsCollector:          statsCollect,
 		wg:                      sync.WaitGroup{},
 		events:                  make(chan ContainerEvent),
@@ -267,6 +271,74 @@ func (s *ContainerStore) SubscribeNewContainers(ctx context.Context, containers 
 	}()
 }
 
+func (s *ContainerStore) SubscribeLogStats(ctx context.Context, logStats chan<- LogStat) {
+	s.logStatSubscribers.Store(ctx, logStats)
+	go func() {
+		<-ctx.Done()
+		s.logStatSubscribers.Delete(ctx)
+	}()
+}
+
+// collectLogStats fetches recent logs for all running containers and counts by level.
+func (s *ContainerStore) collectLogStats() {
+	var ids []string
+	s.containers.Range(func(id string, c *Container) bool {
+		if c.State == "running" {
+			ids = append(ids, id)
+		}
+		return true
+	})
+
+	if len(ids) == 0 {
+		return
+	}
+
+	now := time.Now()
+	since := now.Add(-logStatsInterval)
+
+	for _, id := range ids {
+		ctx, cancel := context.WithTimeout(s.ctx, 2*time.Second)
+		reader, err := s.client.ContainerLogsBetweenDates(ctx, id, since, now, STDALL)
+		if err != nil {
+			cancel()
+			continue
+		}
+
+		stat := LogStat{ID: id}
+		scanner := bufio.NewScanner(reader)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if len(line) == 0 {
+				continue
+			}
+			level := GuessLogLevelFromLine(line)
+			switch level {
+			case "info":
+				stat.Info++
+			case "warn":
+				stat.Warn++
+			case "error":
+				stat.Error++
+			case "debug":
+				stat.Debug++
+			case "fatal":
+				stat.Fatal++
+			}
+		}
+		reader.Close()
+		cancel()
+
+		s.logStatSubscribers.Range(func(c context.Context, ch chan<- LogStat) bool {
+			select {
+			case ch <- stat:
+			case <-c.Done():
+				s.logStatSubscribers.Delete(c)
+			}
+			return true
+		})
+	}
+}
+
 // reconcile compares the in-memory container map with the actual Docker state
 // and removes any containers that Docker no longer knows about. This handles
 // cases where destroy events are missed (network hiccups, Docker race conditions).
@@ -329,6 +401,9 @@ func (s *ContainerStore) init() {
 
 	reconcileTicker := time.NewTicker(reconcileInterval)
 	defer reconcileTicker.Stop()
+
+	logStatsTicker := time.NewTicker(logStatsInterval)
+	defer logStatsTicker.Stop()
 
 	for {
 		select {
@@ -477,6 +552,9 @@ func (s *ContainerStore) init() {
 
 		case <-reconcileTicker.C:
 			s.reconcile()
+
+		case <-logStatsTicker.C:
+			go s.collectLogStats()
 
 		case <-s.ctx.Done():
 			return
