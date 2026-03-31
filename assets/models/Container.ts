@@ -38,7 +38,7 @@ export class Container {
   private readonly _statsHistory: Ref<Stat[]>;
   private readonly movingAverageStat: Ref<Stat>;
   private readonly _logStatsHistory: Ref<LogFreq[]>;
-  readonly _logStatsVersion: Ref<number>;
+  private readonly _logStatsVersion: Ref<number>;
 
   // Crash-loop / exit tracking
   public lastExitCode: string | null = null;
@@ -183,7 +183,8 @@ export class Container {
     if (isRef(this._logStatsVersion)) {
       this._logStatsVersion.value++;
     } else {
-      (this._logStatsVersion as unknown as number)++;
+      // When unwrapped by reactive(), assign via property to trigger reactivity
+      (this as any)._logStatsVersion = (this._logStatsVersion as unknown as number) + 1;
     }
   }
 

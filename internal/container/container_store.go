@@ -333,9 +333,14 @@ func (s *ContainerStore) collectLogStats() {
 	var mu sync.Mutex
 	var results []LogStat
 
+loop:
 	for _, t := range targets {
+		select {
+		case sem <- struct{}{}: // acquire
+		case <-s.ctx.Done():
+			break loop
+		}
 		wg.Add(1)
-		sem <- struct{}{} // acquire
 		go func(t idTty) {
 			defer wg.Done()
 			defer func() { <-sem }() // release
