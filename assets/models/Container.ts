@@ -38,10 +38,13 @@ export class Container {
   private readonly _statsHistory: Ref<Stat[]>;
   private readonly movingAverageStat: Ref<Stat>;
   private readonly _logStatsHistory: Ref<LogFreq[]>;
+  readonly _logStatsVersion: Ref<number>;
 
   // Crash-loop / exit tracking
   public lastExitCode: string | null = null;
   private _restartTimestamps: number[] = [];
+  private _cachedRestartCount: number = 0;
+  private _restartCacheTime: number = 0;
 
   constructor(
     public readonly id: string,
@@ -69,12 +72,17 @@ export class Container {
     this.movingAverageStat = ref(stats.at(-1) || defaultStat);
     const logPadding = Array(LOG_STATS_HISTORY_SIZE).fill(defaultLogFreq);
     this._logStatsHistory = ref(logPadding);
+    this._logStatsVersion = ref(0);
 
     this._name = name;
   }
 
   get logStatsHistory() {
     return unref(this._logStatsHistory);
+  }
+
+  get logStatsVersion(): number {
+    return isRef(this._logStatsVersion) ? this._logStatsVersion.value : (this._logStatsVersion as unknown as number);
   }
 
   get statsHistory() {
@@ -172,6 +180,11 @@ export class Container {
     if (history.length > LOG_STATS_HISTORY_SIZE) {
       history.shift();
     }
+    if (isRef(this._logStatsVersion)) {
+      this._logStatsVersion.value++;
+    } else {
+      (this._logStatsVersion as unknown as number)++;
+    }
   }
 
   public recordDie(exitCode?: string) {
@@ -188,10 +201,16 @@ export class Container {
 
   get restartCount(): number {
     const now = Date.now();
+    // Re-compute at most once per second to avoid repeated Date.now()+filter calls
+    if (now - this._restartCacheTime < 1000) {
+      return this._cachedRestartCount;
+    }
     const cutoff = now - RESTART_WINDOW_MS;
     // Prune stale timestamps while counting
     this._restartTimestamps = this._restartTimestamps.filter((t) => t > cutoff);
-    return this._restartTimestamps.length;
+    this._cachedRestartCount = this._restartTimestamps.length;
+    this._restartCacheTime = now;
+    return this._cachedRestartCount;
   }
 
   get isCrashLooping(): boolean {

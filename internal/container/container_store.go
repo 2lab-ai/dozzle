@@ -328,19 +328,37 @@ func (s *ContainerStore) collectLogStats() {
 	now := time.Now()
 	since := now.Add(-logStatsInterval)
 
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 5) // max 5 concurrent
+	var mu sync.Mutex
+	var results []LogStat
+
 	for _, t := range targets {
-		ctx, cancel := context.WithTimeout(s.ctx, 2*time.Second)
-		reader, err := s.client.ContainerLogsBetweenDates(ctx, t.id, since, now, STDALL)
-		if err != nil {
-			log.Debug().Err(err).Str("id", t.id).Msg("failed to fetch logs for log stats")
-			cancel()
-			continue
-		}
+		wg.Add(1)
+		sem <- struct{}{} // acquire
+		go func(t idTty) {
+			defer wg.Done()
+			defer func() { <-sem }() // release
 
-		stat := s.collectLogStatForContainer(ctx, t.id, t.tty, reader)
-		reader.Close()
-		cancel()
+			ctx, cancel := context.WithTimeout(s.ctx, 2*time.Second)
+			defer cancel()
+			reader, err := s.client.ContainerLogsBetweenDates(ctx, t.id, since, now, STDALL)
+			if err != nil {
+				log.Debug().Err(err).Str("id", t.id).Msg("failed to fetch logs for log stats")
+				return
+			}
+			stat := s.collectLogStatForContainer(ctx, t.id, t.tty, reader)
+			reader.Close()
 
+			mu.Lock()
+			results = append(results, stat)
+			mu.Unlock()
+		}(t)
+	}
+	wg.Wait()
+
+	// Publish all results
+	for _, stat := range results {
 		s.logStatSubscribers.Range(func(c context.Context, ch chan<- LogStat) bool {
 			select {
 			case ch <- stat:
