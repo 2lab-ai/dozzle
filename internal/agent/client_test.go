@@ -85,6 +85,10 @@ func (m *MockedClientService) SubscribeContainersStarted(ctx context.Context, co
 	m.Called(ctx, containers)
 }
 
+func (m *MockedClientService) SubscribeLogStats(ctx context.Context, logStats chan<- container.LogStat) {
+	m.Called(ctx, logStats)
+}
+
 func (m *MockedClientService) StreamLogs(ctx context.Context, c container.Container, from time.Time, stdTypes container.StdType, events chan<- *container.LogEvent) error {
 	args := m.Called(ctx, c, from, stdTypes, events)
 	return args.Error(0)

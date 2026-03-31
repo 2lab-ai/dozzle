@@ -72,6 +72,10 @@ func (d *agentService) SubscribeContainersStarted(ctx context.Context, container
 	go d.client.StreamNewContainers(ctx, containers)
 }
 
+func (a *agentService) SubscribeLogStats(ctx context.Context, logStats chan<- container.LogStat) {
+	// Log stats not supported for remote agents yet
+}
+
 func (a *agentService) ContainerAction(ctx context.Context, container container.Container, action container.ContainerAction) error {
 	return a.client.ContainerAction(ctx, container.ID, action)
 }

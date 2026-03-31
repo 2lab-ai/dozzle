@@ -129,6 +129,12 @@ func (m *MultiHostService) SubscribeEventsAndStats(ctx context.Context, events c
 	}
 }
 
+func (m *MultiHostService) SubscribeLogStats(ctx context.Context, logStats chan<- container.LogStat) {
+	for _, client := range m.manager.List() {
+		client.SubscribeLogStats(ctx, logStats)
+	}
+}
+
 func (m *MultiHostService) SubscribeContainersStarted(ctx context.Context, containers chan<- container.Container, filter container_support.ContainerFilter) {
 	newContainers := make(chan container.Container)
 	for _, client := range m.manager.List() {

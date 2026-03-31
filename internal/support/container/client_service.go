@@ -22,6 +22,7 @@ type ClientService interface {
 	SubscribeStats(context.Context, chan<- container.ContainerStat)
 	SubscribeEvents(context.Context, chan<- container.ContainerEvent)
 	SubscribeContainersStarted(context.Context, chan<- container.Container)
+	SubscribeLogStats(context.Context, chan<- container.LogStat)
 
 	// Blocking streaming functions that should be used in a goroutine
 	StreamLogs(context.Context, container.Container, time.Time, container.StdType, chan<- *container.LogEvent) error

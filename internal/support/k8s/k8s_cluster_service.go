@@ -99,6 +99,10 @@ func (m *K8sClusterService) SubscribeEventsAndStats(ctx context.Context, events 
 	m.client.SubscribeStats(ctx, stats)
 }
 
+func (m *K8sClusterService) SubscribeLogStats(ctx context.Context, logStats chan<- container.LogStat) {
+	m.client.SubscribeLogStats(ctx, logStats)
+}
+
 func (m *K8sClusterService) SubscribeContainersStarted(ctx context.Context, containers chan<- container.Container, filter container_support.ContainerFilter) {
 	newContainers := make(chan container.Container)
 	m.client.SubscribeContainersStarted(ctx, newContainers)

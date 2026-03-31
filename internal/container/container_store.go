@@ -1,8 +1,11 @@
 package container
 
 import (
+	"bufio"
 	"context"
+	"encoding/binary"
 	"errors"
+	"io"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -23,10 +26,12 @@ type ContainerStore struct {
 	containers              *xsync.Map[string, *Container]
 	subscribers             *xsync.Map[context.Context, chan<- ContainerEvent]
 	newContainerSubscribers *xsync.Map[context.Context, chan<- Container]
+	logStatSubscribers      *xsync.Map[context.Context, chan<- LogStat]
 	client                  Client
 	statsCollector          StatsCollector
 	wg                      sync.WaitGroup
 	connected               atomic.Bool
+	logStatsRunning          atomic.Bool
 	events                  chan ContainerEvent
 	ctx                     context.Context
 	labels                  ContainerLabels
@@ -34,6 +39,7 @@ type ContainerStore struct {
 
 const defaultTimeout = 10 * time.Second
 const reconcileInterval = 30 * time.Second
+const logStatsInterval = 5 * time.Second
 
 func NewContainerStore(ctx context.Context, client Client, statsCollect StatsCollector, labels ContainerLabels) *ContainerStore {
 	log.Debug().Str("host", client.Host().Name).Interface("labels", labels).Msg("initializing container store")
@@ -43,6 +49,7 @@ func NewContainerStore(ctx context.Context, client Client, statsCollect StatsCol
 		client:                  client,
 		subscribers:             xsync.NewMap[context.Context, chan<- ContainerEvent](),
 		newContainerSubscribers: xsync.NewMap[context.Context, chan<- Container](),
+		logStatSubscribers:      xsync.NewMap[context.Context, chan<- LogStat](),
 		statsCollector:          statsCollect,
 		wg:                      sync.WaitGroup{},
 		events:                  make(chan ContainerEvent),
@@ -267,6 +274,148 @@ func (s *ContainerStore) SubscribeNewContainers(ctx context.Context, containers 
 	}()
 }
 
+func (s *ContainerStore) SubscribeLogStats(ctx context.Context, logStats chan<- LogStat) {
+	s.logStatSubscribers.Store(ctx, logStats)
+	go func() {
+		<-ctx.Done()
+		s.logStatSubscribers.Delete(ctx)
+	}()
+}
+
+// demuxDockerStream strips the 8-byte multiplexed headers from non-TTY Docker log streams,
+// writing clean text to w. For TTY containers, it copies the stream as-is.
+func demuxDockerStream(w io.Writer, r io.Reader, tty bool) error {
+	if tty {
+		_, err := io.Copy(w, r)
+		return err
+	}
+	header := make([]byte, 8)
+	for {
+		if _, err := io.ReadFull(r, header); err != nil {
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				return nil
+			}
+			return err
+		}
+		size := binary.BigEndian.Uint32(header[4:])
+		if size == 0 {
+			continue
+		}
+		if _, err := io.CopyN(w, r, int64(size)); err != nil {
+			return err
+		}
+	}
+}
+
+// collectLogStats fetches recent logs for all running containers and counts by level.
+func (s *ContainerStore) collectLogStats() {
+	type idTty struct {
+		id  string
+		tty bool
+	}
+	var targets []idTty
+	s.containers.Range(func(id string, c *Container) bool {
+		if c.State == "running" {
+			targets = append(targets, idTty{id: id, tty: c.Tty})
+		}
+		return true
+	})
+
+	if len(targets) == 0 {
+		return
+	}
+
+	now := time.Now()
+	since := now.Add(-logStatsInterval)
+
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 5) // max 5 concurrent
+	var mu sync.Mutex
+	var results []LogStat
+
+loop:
+	for _, t := range targets {
+		select {
+		case sem <- struct{}{}: // acquire
+		case <-s.ctx.Done():
+			break loop
+		}
+		wg.Add(1)
+		go func(t idTty) {
+			defer wg.Done()
+			defer func() { <-sem }() // release
+
+			ctx, cancel := context.WithTimeout(s.ctx, 2*time.Second)
+			defer cancel()
+			reader, err := s.client.ContainerLogsBetweenDates(ctx, t.id, since, now, STDALL)
+			if err != nil {
+				log.Debug().Err(err).Str("id", t.id).Msg("failed to fetch logs for log stats")
+				return
+			}
+			stat := s.collectLogStatForContainer(ctx, t.id, t.tty, reader)
+			reader.Close()
+
+			mu.Lock()
+			results = append(results, stat)
+			mu.Unlock()
+		}(t)
+	}
+	wg.Wait()
+
+	// Publish all results
+	for _, stat := range results {
+		s.logStatSubscribers.Range(func(c context.Context, ch chan<- LogStat) bool {
+			select {
+			case ch <- stat:
+			case <-c.Done():
+				s.logStatSubscribers.Delete(c)
+			default:
+				// Drop stat if subscriber is slow — don't block the collector
+			}
+			return true
+		})
+	}
+}
+
+// collectLogStatForContainer demuxes and scans logs for a single container.
+func (s *ContainerStore) collectLogStatForContainer(_ context.Context, id string, tty bool, reader io.ReadCloser) LogStat {
+	pr, pw := io.Pipe()
+	go func() {
+		err := demuxDockerStream(pw, reader, tty)
+		pw.CloseWithError(err) // always propagate (nil is fine)
+	}()
+
+	stat := LogStat{ID: id}
+	scanner := bufio.NewScanner(pr)
+	scanner.Buffer(make([]byte, 0, 256*1024), 256*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if len(line) == 0 {
+			continue
+		}
+		level := GuessLogLevelFromLine(line)
+		switch level {
+		case "info":
+			stat.Info++
+		case "warn":
+			stat.Warn++
+		case "error":
+			stat.Error++
+		case "debug":
+			stat.Debug++
+		case "fatal":
+			stat.Fatal++
+		default:
+			stat.Info++
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		log.Debug().Err(err).Str("id", id).Msg("scanner error during log stats collection")
+	}
+	pr.Close()
+	return stat
+}
+
 // reconcile compares the in-memory container map with the actual Docker state
 // and removes any containers that Docker no longer knows about. This handles
 // cases where destroy events are missed (network hiccups, Docker race conditions).
@@ -329,6 +478,9 @@ func (s *ContainerStore) init() {
 
 	reconcileTicker := time.NewTicker(reconcileInterval)
 	defer reconcileTicker.Stop()
+
+	logStatsTicker := time.NewTicker(logStatsInterval)
+	defer logStatsTicker.Stop()
 
 	for {
 		select {
@@ -477,6 +629,14 @@ func (s *ContainerStore) init() {
 
 		case <-reconcileTicker.C:
 			s.reconcile()
+
+		case <-logStatsTicker.C:
+			if s.logStatsRunning.CompareAndSwap(false, true) {
+				go func() {
+					defer s.logStatsRunning.Store(false)
+					s.collectLogStats()
+				}()
+			}
 
 		case <-s.ctx.Done():
 			return

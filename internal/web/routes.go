@@ -70,6 +70,7 @@ type HostService interface {
 	ListAllContainers(labels container.ContainerLabels) ([]container.Container, []error)
 	ListAllContainersFiltered(userFilter container.ContainerLabels, filter container_support.ContainerFilter) ([]container.Container, []error)
 	SubscribeEventsAndStats(ctx context.Context, events chan<- container.ContainerEvent, stats chan<- container.ContainerStat)
+	SubscribeLogStats(ctx context.Context, logStats chan<- container.LogStat)
 	SubscribeContainersStarted(ctx context.Context, containers chan<- container.Container, filter container_support.ContainerFilter)
 	Hosts() []container.Host
 	LocalHost() (container.Host, error)

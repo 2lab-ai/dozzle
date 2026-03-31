@@ -44,6 +44,7 @@ type ClientService interface {
 	SubscribeStats(context.Context, chan<- container.ContainerStat)
 	SubscribeEvents(context.Context, chan<- container.ContainerEvent)
 	SubscribeContainersStarted(context.Context, chan<- container.Container)
+	SubscribeLogStats(context.Context, chan<- container.LogStat)
 	StreamLogs(context.Context, container.Container, time.Time, container.StdType, chan<- *container.LogEvent) error
 	Attach(context.Context, container.Container, container.ExecEventReader, io.Writer) error
 	Exec(context.Context, container.Container, []string, container.ExecEventReader, io.Writer) error

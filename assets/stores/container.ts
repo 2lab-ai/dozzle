@@ -1,6 +1,6 @@
 import { acceptHMRUpdate, defineStore } from "pinia";
 import { Ref, UnwrapNestedRefs } from "vue";
-import type { ContainerHealth, ContainerJson, ContainerStat } from "@/types/Container";
+import type { ContainerHealth, ContainerJson, ContainerStat, LogStat } from "@/types/Container";
 import { Container } from "@/models/Container";
 import i18n from "@/modules/i18n";
 import { Host } from "./hosts";
@@ -60,14 +60,34 @@ export const useContainerStore = defineStore("container", () => {
         container.updateStat(rest);
       }
     });
+    es.addEventListener("container-log-stat", (e) => {
+      const logStat = JSON.parse((e as MessageEvent).data) as LogStat;
+      const container = allContainersById.value[logStat.id] as unknown as UnwrapNestedRefs<Container>;
+      if (container) {
+        const { id, ...rest } = logStat;
+        container.updateLogStat(rest);
+      }
+    });
     es.addEventListener("container-event", (e) => {
-      const event = JSON.parse((e as MessageEvent).data) as { actorId: string; name: string; time: string };
+      const event = JSON.parse((e as MessageEvent).data) as {
+        actorId: string;
+        name: string;
+        time: string;
+        actorAttributes?: Record<string, string>;
+      };
       const container = allContainersById.value[event.actorId];
       if (container) {
         switch (event.name) {
           case "die":
             container.state = "exited";
             container.finishedAt = new Date(event.time);
+            container.recordDie(event.actorAttributes?.exitCode);
+            break;
+          case "start":
+            if (container.state === "exited") {
+              container.recordRestart();
+            }
+            container.state = "running";
             break;
           case "destroy":
             container.state = "deleted";

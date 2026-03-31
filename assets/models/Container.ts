@@ -1,7 +1,8 @@
-import type { ContainerHealth, ContainerJson, ContainerStat, ContainerState } from "@/types/Container";
+import type { ContainerHealth, ContainerJson, ContainerStat, ContainerState, LogStat } from "@/types/Container";
 import { Ref } from "vue";
 
 export type Stat = Omit<ContainerStat, "id">;
+export type LogFreq = Omit<LogStat, "id">;
 
 const hosts = computed(() =>
   config.hosts.reduce(
@@ -27,11 +28,23 @@ export class HistoricalContainer {
   ) {}
 }
 
+const defaultLogFreq: LogFreq = { info: 0, warn: 0, error: 0, debug: 0, fatal: 0 };
+const LOG_STATS_HISTORY_SIZE = 60;
+const RESTART_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
+
 export class Container {
   private _stat: Ref<Stat>;
   private _name: string;
   private readonly _statsHistory: Ref<Stat[]>;
   private readonly movingAverageStat: Ref<Stat>;
+  private readonly _logStatsHistory: Ref<LogFreq[]>;
+  private readonly _logStatsVersion: Ref<number>;
+
+  // Crash-loop / exit tracking
+  public lastExitCode: string | null = null;
+  private _restartTimestamps: number[] = [];
+  private _cachedRestartCount: number = 0;
+  private _restartCacheTime: number = 0;
 
   constructor(
     public readonly id: string,
@@ -57,8 +70,19 @@ export class Container {
     const padding = Array(300 - recentStats.length).fill(defaultStat);
     this._statsHistory = ref([...padding, ...recentStats]);
     this.movingAverageStat = ref(stats.at(-1) || defaultStat);
+    const logPadding = Array(LOG_STATS_HISTORY_SIZE).fill(defaultLogFreq);
+    this._logStatsHistory = ref(logPadding);
+    this._logStatsVersion = ref(0);
 
     this._name = name;
+  }
+
+  get logStatsHistory() {
+    return unref(this._logStatsHistory);
+  }
+
+  get logStatsVersion(): number {
+    return isRef(this._logStatsVersion) ? this._logStatsVersion.value : (this._logStatsVersion as unknown as number);
   }
 
   get statsHistory() {
@@ -146,6 +170,85 @@ export class Container {
     } else {
       (this.movingAverageStat as unknown as Stat) = newEma;
     }
+  }
+
+  public updateLogStat(logStat: LogFreq) {
+    const history = isRef(this._logStatsHistory)
+      ? this._logStatsHistory.value
+      : (this._logStatsHistory as unknown as LogFreq[]);
+    history.push(logStat);
+    if (history.length > LOG_STATS_HISTORY_SIZE) {
+      history.shift();
+    }
+    if (isRef(this._logStatsVersion)) {
+      this._logStatsVersion.value++;
+    } else {
+      // When unwrapped by reactive(), assign via property to trigger reactivity
+      (this as any)._logStatsVersion = (this._logStatsVersion as unknown as number) + 1;
+    }
+  }
+
+  public recordDie(exitCode?: string) {
+    this.lastExitCode = exitCode ?? null;
+  }
+
+  public recordRestart() {
+    const now = Date.now();
+    this._restartTimestamps.push(now);
+    // Keep only timestamps within the window
+    const cutoff = now - RESTART_WINDOW_MS;
+    this._restartTimestamps = this._restartTimestamps.filter((t) => t > cutoff);
+  }
+
+  get restartCount(): number {
+    const now = Date.now();
+    // Re-compute at most once per second to avoid repeated Date.now()+filter calls
+    if (now - this._restartCacheTime < 1000) {
+      return this._cachedRestartCount;
+    }
+    const cutoff = now - RESTART_WINDOW_MS;
+    // Prune stale timestamps while counting
+    this._restartTimestamps = this._restartTimestamps.filter((t) => t > cutoff);
+    this._cachedRestartCount = this._restartTimestamps.length;
+    this._restartCacheTime = now;
+    return this._cachedRestartCount;
+  }
+
+  get isCrashLooping(): boolean {
+    return this.restartCount >= 3;
+  }
+
+  get statusBadge(): { text: string; type: "error" | "warning" | "info" } | null {
+    const restarts = this.restartCount;
+    if (restarts >= 3) {
+      return { text: `${restarts} restarts`, type: "error" };
+    }
+    if (this.lastExitCode && this.lastExitCode !== "0" && this.state === "exited") {
+      const code = this.lastExitCode;
+      // 137=SIGKILL (may be OOM but not always), 143=SIGTERM
+      const label = code === "137" ? "Killed" : code === "143" ? "SIGTERM" : `Exit ${code}`;
+      return { text: label, type: "warning" };
+    }
+    if (this.health === "unhealthy") {
+      return { text: "unhealthy", type: "warning" };
+    }
+    return null;
+  }
+
+  /** Anomaly score for "hot" sorting — higher means more attention needed */
+  get anomalyScore(): number {
+    let score = 0;
+    const restarts = this.restartCount;
+    score += restarts * 20;
+    if (this.health === "unhealthy") score += 30;
+    if (this.lastExitCode && this.lastExitCode !== "0" && this.state === "exited") score += 15;
+    const recent = this.logStatsHistory.slice(-3);
+    for (const r of recent) {
+      score += r.error * 3 + r.fatal * 10 + r.warn;
+    }
+    if (this.movingAverage.cpu > 80) score += 10;
+    if (this.movingAverage.memory > 85) score += 10;
+    return score;
   }
 
   static fromJSON(c: ContainerJson): Container {

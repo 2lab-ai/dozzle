@@ -23,9 +23,11 @@ func (h *handler) streamEvents(w http.ResponseWriter, r *http.Request) {
 
 	events := make(chan container.ContainerEvent)
 	stats := make(chan container.ContainerStat)
+	logStats := make(chan container.LogStat, 50)
 	availableHosts := make(chan container.Host)
 
 	h.hostService.SubscribeEventsAndStats(r.Context(), events, stats)
+	h.hostService.SubscribeLogStats(r.Context(), logStats)
 	h.hostService.SubscribeAvailableHosts(r.Context(), availableHosts)
 
 	userLabels := h.config.Labels
@@ -63,6 +65,11 @@ func (h *handler) streamEvents(w http.ResponseWriter, r *http.Request) {
 		case stat := <-stats:
 			if err := sseWriter.Event("container-stat", stat); err != nil {
 				log.Error().Err(err).Msg("error writing event to event stream")
+				return
+			}
+		case logStat := <-logStats:
+			if err := sseWriter.Event("container-log-stat", logStat); err != nil {
+				log.Error().Err(err).Msg("error writing log stat to event stream")
 				return
 			}
 		case event, ok := <-events:

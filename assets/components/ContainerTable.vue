@@ -87,7 +87,7 @@
           <tr
             v-for="container in paginated"
             :key="container.id"
-            v-memo="[container.id, statMode]"
+            v-memo="[container.id, statMode, container.state, container.logStatsVersion, container.anomalyScore]"
             class="hover:bg-base-100/80!"
           >
             <td v-if="isVisible('name')" class="max-w-80 truncate">
@@ -96,7 +96,20 @@
               </router-link>
             </td>
             <td v-if="isVisible('host')">{{ container.hostLabel }}</td>
-            <td v-if="isVisible('state')">{{ container.state }}</td>
+            <td v-if="isVisible('state')">
+              <span>{{ container.state }}</span>
+              <span
+                v-if="container.statusBadge"
+                class="badge ml-1 text-xs"
+                :class="{
+                  'badge-error': container.statusBadge.type === 'error',
+                  'badge-warning': container.statusBadge.type === 'warning',
+                  'badge-info': container.statusBadge.type === 'info',
+                }"
+              >
+                {{ container.statusBadge.text }}
+              </span>
+            </td>
             <td v-if="isVisible('created')">
               <RelativeTime :date="container.created" />
             </td>
@@ -105,6 +118,25 @@
             </td>
             <td v-if="isVisible('mem')">
               <ContainerStatCell :container="container" type="mem" :host="hosts[container.host]" :mode="statMode" />
+            </td>
+            <td v-if="isVisible('logs')">
+              <div class="flex flex-row items-center gap-2">
+                <LogFrequencyChart class="h-4 flex-1" :chart-data="container.logStatsHistory" />
+                <span class="min-w-10 text-right text-sm tabular-nums">{{ totalLogRate(container) }}</span>
+              </div>
+            </td>
+            <td v-if="isVisible('hot')">
+              <span
+                v-if="container.anomalyScore > 0"
+                class="badge badge-sm tabular-nums"
+                :class="{
+                  'badge-error': container.anomalyScore >= 50,
+                  'badge-warning': container.anomalyScore >= 10 && container.anomalyScore < 50,
+                  'badge-info': container.anomalyScore > 0 && container.anomalyScore < 10,
+                }"
+              >
+                {{ container.anomalyScore }}
+              </span>
             </td>
           </tr>
         </tbody>
@@ -183,6 +215,24 @@ const fields: Record<
     mobileVisible: false,
     customClass: "min-w-48",
   },
+  logs: {
+    label: "label.log-freq",
+    sortFunc: (a: Container, b: Container) => {
+      const aLast = a.logStatsHistory.at(-1);
+      const bLast = b.logStatsHistory.at(-1);
+      const aTotal = aLast ? aLast.info + aLast.warn + aLast.error + aLast.debug + aLast.fatal : 0;
+      const bTotal = bLast ? bLast.info + bLast.warn + bLast.error + bLast.debug + bLast.fatal : 0;
+      return (aTotal - bTotal) * direction.value;
+    },
+    mobileVisible: false,
+    customClass: "min-w-40",
+  },
+  hot: {
+    label: "label.hot",
+    sortFunc: (a: Container, b: Container) => (a.anomalyScore - b.anomalyScore) * direction.value,
+    mobileVisible: false,
+    customClass: "w-1",
+  },
 };
 
 const { containers } = defineProps<{
@@ -227,6 +277,14 @@ function sort(field: keys) {
     direction.value = 1;
   }
 }
+function totalLogRate(container: Container): string {
+  const last = container.logStatsHistory.at(-1);
+  if (!last) return "0";
+  const total = last.info + last.warn + last.error + last.debug + last.fatal;
+  if (total >= 1000) return `${(total / 1000).toFixed(1)}k`;
+  return `${total}`;
+}
+
 function isVisible(field: keys) {
   return fields[field].mobileVisible || !isMobile.value;
 }
